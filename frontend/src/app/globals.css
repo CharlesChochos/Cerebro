@@ -1,0 +1,195 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Phase 13: Event ripple animations */
+@keyframes cerebro-ripple {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); transform: scale(1); }
+  50% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); transform: scale(1.1); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); transform: scale(1); }
+}
+
+@keyframes cerebro-pulse-beacon {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(1.6); }
+}
+
+@keyframes cerebro-arc-flow {
+  0% { stroke-dashoffset: 100; }
+  100% { stroke-dashoffset: 0; }
+}
+
+.cerebro-ripple { animation: cerebro-ripple 1.5s ease-out; }
+.cerebro-beacon { animation: cerebro-pulse-beacon 2s ease-in-out infinite; }
+.cerebro-arc-anim { animation: cerebro-arc-flow 2s linear infinite; }
+
+/* Shockwave propagation ring */
+@keyframes cerebro-shockwave {
+  0% { width: 0; height: 0; opacity: 0.9; border-width: 3px; }
+  70% { opacity: 0.3; border-width: 1.5px; }
+  100% { width: 200px; height: 200px; opacity: 0; border-width: 0.5px; }
+}
+.cerebro-shockwave {
+  position: absolute;
+  border-radius: 50%;
+  border-style: solid;
+  border-color: rgba(239, 68, 68, 0.7);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: cerebro-shockwave 2.5s ease-out forwards;
+}
+.cerebro-shockwave.wave-2 {
+  animation-delay: 0.4s;
+  border-color: rgba(249, 115, 22, 0.5);
+}
+.cerebro-shockwave.wave-3 {
+  animation-delay: 0.8s;
+  border-color: rgba(234, 179, 8, 0.4);
+}
+
+/* Animated cluster breathing */
+@keyframes cerebro-cluster-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+.cerebro-cluster-breathe {
+  animation: cerebro-cluster-breathe 3s ease-in-out infinite;
+}
+
+/* Risk score odometer digit */
+@keyframes cerebro-digit-roll {
+  0% { transform: translateY(100%); opacity: 0; }
+  30% { opacity: 1; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.cerebro-odometer-digit {
+  display: inline-block;
+  overflow: hidden;
+  height: 1.2em;
+  line-height: 1.2em;
+  vertical-align: bottom;
+}
+.cerebro-odometer-digit span {
+  display: block;
+  animation: cerebro-digit-roll 0.6s ease-out forwards;
+}
+.cerebro-odometer-digit:nth-child(2) span { animation-delay: 0.08s; }
+.cerebro-odometer-digit:nth-child(3) span { animation-delay: 0.16s; }
+.cerebro-odometer-digit:nth-child(4) span { animation-delay: 0.24s; }
+
+/* Particle trail glow */
+@keyframes cerebro-particle-glow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.8; }
+}
+.cerebro-particle-glow {
+  animation: cerebro-particle-glow 2s ease-in-out infinite;
+}
+
+/* News ticker scroll */
+@keyframes cerebro-ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+/* ── Iron Man HUD overlay ── */
+.cerebro-hud-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  border: 1px solid rgba(52, 211, 153, 0.15);
+}
+.cerebro-hud-corner {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border-color: rgba(52, 211, 153, 0.5);
+  border-style: solid;
+  border-width: 0;
+}
+.cerebro-hud-corner.tl { top: 8px; left: 8px; border-top-width: 2px; border-left-width: 2px; }
+.cerebro-hud-corner.tr { top: 8px; right: 8px; border-top-width: 2px; border-right-width: 2px; }
+.cerebro-hud-corner.bl { bottom: 8px; left: 8px; border-bottom-width: 2px; border-left-width: 2px; }
+.cerebro-hud-corner.br { bottom: 8px; right: 8px; border-bottom-width: 2px; border-right-width: 2px; }
+
+@keyframes cerebro-hud-scan {
+  0% { top: 0; opacity: 0.6; }
+  50% { opacity: 0.15; }
+  100% { top: 100%; opacity: 0.6; }
+}
+.cerebro-hud-scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent 0%, rgba(52, 211, 153, 0.5) 20%, rgba(52, 211, 153, 0.7) 50%, rgba(52, 211, 153, 0.5) 80%, transparent 100%);
+  z-index: 21;
+  pointer-events: none;
+  animation: cerebro-hud-scan 4s linear infinite;
+}
+
+/* Missile arc animation */
+@keyframes cerebro-arc-dash {
+  0% { line-dasharray: 0, 200; }
+  100% { line-dasharray: 200, 0; }
+}
+
+/* Range ring pulse */
+@keyframes cerebro-range-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.5; }
+}
+.cerebro-range-pulse {
+  animation: cerebro-range-pulse 3s ease-in-out infinite;
+}
+
+/* ── Panel transitions ── */
+@keyframes cerebro-slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes cerebro-slide-in-bottom {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes cerebro-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Glassmorphism panel style */
+.cerebro-glassmorphism {
+  background: rgba(24, 24, 27, 0.65);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border-color: rgba(63, 63, 70, 0.3);
+}
+
+/* NavRail separator glow */
+.cerebro-rail-glow {
+  box-shadow: 1px 0 12px rgba(6, 182, 212, 0.06);
+}
