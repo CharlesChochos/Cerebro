@@ -160,10 +160,8 @@ export default function CesiumGlobe() {
   const [showLighting, setShowLighting] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
-  // Tactical chrome / style preset
+  // Style preset (visual filter on the canvas + optional scanlines)
   const [stylePreset, setStylePreset] = useState<StylePreset>("crt");
-  const [cameraCoords, setCameraCoords] = useState({ lat: 0, lng: 0, alt: 15_000_000 });
-  const [frameMs, setFrameMs] = useState(0);
 
   // Camera & overlays
   const [cameraAlt, setCameraAlt] = useState(15_000_000);
@@ -311,19 +309,8 @@ export default function CesiumGlobe() {
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer || viewer.isDestroyed()) return;
-    let lastFrameStart = performance.now();
     const interval = setInterval(() => {
-      if (viewer.isDestroyed()) return;
-      const c = viewer.camera.positionCartographic;
-      // Cesium gives lat/lng in radians; convert to degrees
-      const lat = (c.latitude * 180) / Math.PI;
-      const lng = (c.longitude * 180) / Math.PI;
-      setCameraAlt(c.height);
-      setCameraCoords({ lat, lng, alt: c.height });
-      // Cheap frame-time estimate: time between sampling intervals
-      const now = performance.now();
-      setFrameMs(Math.max(0, (now - lastFrameStart) / 100));
-      lastFrameStart = now;
+      if (!viewer.isDestroyed()) setCameraAlt(viewer.camera.positionCartographic.height);
     }, 500);
     return () => clearInterval(interval);
   }, [viewerReady]);
@@ -1160,12 +1147,8 @@ export default function CesiumGlobe() {
   return (
     <div className="h-full w-full bg-zinc-950 text-white flex relative">
 
-      {/* ── Top-left badge + toggle (lowered when tactical chrome owns the header) ── */}
-      <div
-        className={`absolute left-2 z-40 flex items-center gap-2 pointer-events-auto transition-all ${
-          stylePreset !== "off" ? "top-24" : "top-2"
-        }`}
-      >
+      {/* ── Top-left badge + toggle ── */}
+      <div className="absolute top-2 left-2 z-40 flex items-center gap-2 pointer-events-auto">
         <button
           onClick={() => setSidebarCollapsed(p => !p)}
           className="w-8 h-8 rounded-lg bg-zinc-900/90 border border-zinc-700/50 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 transition-all text-xs backdrop-blur-sm"
@@ -1173,7 +1156,7 @@ export default function CesiumGlobe() {
         >
           {sidebarCollapsed ? "☰" : "✕"}
         </button>
-        {sidebarCollapsed && stylePreset === "off" && (
+        {sidebarCollapsed && (
           <div className="flex items-center gap-2 bg-zinc-900/80 backdrop-blur-sm rounded-lg border border-zinc-700/30 px-2.5 py-1.5 text-[10px] text-zinc-400">
             {loading && <span className="text-cyan-400 animate-pulse">Loading…</span>}
             <span className="text-red-400">{events.length} events</span>
@@ -1202,7 +1185,7 @@ export default function CesiumGlobe() {
       )}
 
       {/* ── Layer Sidebar (slides over globe, doesn't push it) ── */}
-      <aside className={`absolute left-2 z-30 transition-all duration-300 rounded-xl overflow-hidden ${sidebarCollapsed ? "w-0 opacity-0 pointer-events-none" : "w-60 opacity-100"} ${stylePreset !== "off" ? "top-36" : "top-12"}`}>
+      <aside className={`absolute top-12 left-2 z-30 transition-all duration-300 rounded-xl overflow-hidden ${sidebarCollapsed ? "w-0 opacity-0 pointer-events-none" : "w-60 opacity-100"}`}>
         <div className="bg-zinc-900/90 backdrop-blur-md border border-zinc-700/50 rounded-xl max-h-[calc(100vh-6rem)] overflow-y-auto p-3 space-y-3 text-xs">
 
           {/* Data Layers */}
@@ -1315,19 +1298,8 @@ export default function CesiumGlobe() {
           style={{ filter: presetFilter(stylePreset), transition: "filter 0.3s ease-out" }}
         />
 
-        {/* ── Tactical HUD overlay (classifications, MGRS, REC timestamp, style switcher) ── */}
-        <TacticalChrome
-          preset={stylePreset}
-          onPresetChange={setStylePreset}
-          stats={{
-            entities: events.length + vessels.length + flights.length + fires.length,
-            sources: 18,
-            density: (events.length + vessels.length + flights.length) / Math.max(1, cameraAlt / 100_000),
-            frameMs,
-          }}
-          coords={cameraCoords}
-          pinLabel={selectedEntity ? `${selectedEntity.type.toUpperCase()} · ${selectedEntity.title}` : null}
-        />
+        {/* ── Style preset overlay (scanlines/vignette + OFF/CRT/NV/FLIR switcher) ── */}
+        <TacticalChrome preset={stylePreset} onPresetChange={setStylePreset} />
 
         {/* ── Geofence drawing toolbar (top-center, only while drawing) ── */}
         {drawMode && (
