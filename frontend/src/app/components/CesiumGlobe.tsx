@@ -2,6 +2,7 @@
 
 import { useRef, useState, useEffect, useCallback } from "react";
 import { useCesiumViewer } from "./cesium/useCesiumViewer";
+import TacticalChrome, { presetFilter, type StylePreset } from "./TacticalChrome";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -67,22 +68,64 @@ function formatTime(ts: string) {
   catch { return ts; }
 }
 
-// Create SVG airplane billboard — proper airplane silhouette
+// ─── Reticle (corner-bracket) markers — tactical/WORLDVIEW style ───
+// Each marker: 4 L-shaped corners around the entity with a center dot/glyph.
+// Color drives the bracket stroke; glyph is the centered character.
+
+function bracketReticle(color: string, glyph = ""): string {
+  // 24x24, corner brackets at offsets 2..6 / 22..18, center dot at 12,12
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+    <g stroke="${color}" stroke-width="1.4" fill="none" stroke-linecap="square">
+      <polyline points="2,7 2,2 7,2"/>
+      <polyline points="26,7 26,2 21,2"/>
+      <polyline points="2,21 2,26 7,26"/>
+      <polyline points="26,21 26,26 21,26"/>
+    </g>
+    <circle cx="14" cy="14" r="1.5" fill="${color}"/>
+    ${glyph ? `<text x="14" y="11" fill="${color}" font-family="ui-monospace,Menlo" font-size="6" text-anchor="middle" letter-spacing="0.5">${glyph}</text>` : ""}
+  </svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+// Airplane: bracket reticle + ▲ glyph inside
 function createAirplaneSVG(color: string): string {
-  // Top-down airplane: fuselage + swept wings + tail
-  return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><g fill="${color}" stroke="#000" stroke-width="0.4"><path d="M16 1 L17.5 10 L28 15 L17.5 17 L18 26 L16 24 L14 26 L14.5 17 L4 15 L14.5 10Z"/><path d="M14 24 L12 28 L16 26 L20 28 L18 24" opacity="0.8"/></g></svg>`)}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+    <g stroke="${color}" stroke-width="1.3" fill="none" stroke-linecap="square">
+      <polyline points="2,7 2,2 7,2"/><polyline points="26,7 26,2 21,2"/>
+      <polyline points="2,21 2,26 7,26"/><polyline points="26,21 26,26 21,26"/>
+    </g>
+    <path d="M14 6 L16 13 L22 15 L16 16 L14 22 L12 16 L6 15 L12 13Z" fill="${color}" opacity="0.95"/>
+  </svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
-// Create SVG ship billboard — boat hull shape
+
+// Ship: bracket reticle + ■ hull glyph
 function createShipSVG(color: string): string {
-  return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="${color}" stroke="#000" stroke-width="0.4"><path d="M12 2 L15 8 L15 16 L18 20 L6 20 L9 16 L9 8Z"/><rect x="11" y="6" width="2" height="10" fill="#fff" opacity="0.3"/></g></svg>`)}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+    <g stroke="${color}" stroke-width="1.2" fill="none" stroke-linecap="square">
+      <polyline points="2,6 2,2 6,2"/><polyline points="22,6 22,2 18,2"/>
+      <polyline points="2,18 2,22 6,22"/><polyline points="22,18 22,22 18,22"/>
+    </g>
+    <path d="M12 5 L15 11 L15 15 L17 18 L7 18 L9 15 L9 11Z" fill="${color}" opacity="0.9"/>
+  </svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
-// Create SVG webcam billboard — camera icon
+
+// Webcam: bracket reticle + ⊙ camera glyph
 function createWebcamSVG(): string {
-  return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#7c3aed" stroke="#c084fc" stroke-width="1.5"/><rect x="6" y="8" width="12" height="8" rx="1.5" fill="#fff" opacity="0.9"/><circle cx="12" cy="12" r="2.5" fill="#7c3aed"/><path d="M9 8 L12 5 L15 8" fill="#fff" opacity="0.7"/></svg>`)}`;
+  return bracketReticle("#22d3ee", "CAM");
 }
-// Create SVG fire billboard — flame icon
+
+// Fire: bracket reticle + flame (amber)
 function createFireSVG(): string {
-  return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><path d="M10 1 C10 1 14 6 14 10 C14 13 12 15 10 16 C8 15 6 13 6 10 C6 6 10 1 10 1Z" fill="#ff4500" stroke="#fbbf24" stroke-width="0.8"/><path d="M10 7 C10 7 12 9 12 11 C12 12.5 11 13.5 10 14 C9 13.5 8 12.5 8 11 C8 9 10 7 10 7Z" fill="#fbbf24"/></svg>`)}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+    <g stroke="#fbbf24" stroke-width="1.2" fill="none" stroke-linecap="square">
+      <polyline points="2,6 2,2 6,2"/><polyline points="22,6 22,2 18,2"/>
+      <polyline points="2,18 2,22 6,22"/><polyline points="22,18 22,22 18,22"/>
+    </g>
+    <path d="M12 5 C12 5 16 9 16 13 C16 15 14 17 12 17 C10 17 8 15 8 13 C8 9 12 5 12 5Z" fill="#ff6b35" stroke="#fbbf24" stroke-width="0.6"/>
+  </svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 // ─── Component ───
@@ -116,6 +159,11 @@ export default function CesiumGlobe() {
   const [showAtmosphere, setShowAtmosphere] = useState(true);
   const [showLighting, setShowLighting] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+
+  // Tactical chrome / style preset
+  const [stylePreset, setStylePreset] = useState<StylePreset>("crt");
+  const [cameraCoords, setCameraCoords] = useState({ lat: 0, lng: 0, alt: 15_000_000 });
+  const [frameMs, setFrameMs] = useState(0);
 
   // Camera & overlays
   const [cameraAlt, setCameraAlt] = useState(15_000_000);
@@ -263,8 +311,19 @@ export default function CesiumGlobe() {
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer || viewer.isDestroyed()) return;
+    let lastFrameStart = performance.now();
     const interval = setInterval(() => {
-      if (!viewer.isDestroyed()) setCameraAlt(viewer.camera.positionCartographic.height);
+      if (viewer.isDestroyed()) return;
+      const c = viewer.camera.positionCartographic;
+      // Cesium gives lat/lng in radians; convert to degrees
+      const lat = (c.latitude * 180) / Math.PI;
+      const lng = (c.longitude * 180) / Math.PI;
+      setCameraAlt(c.height);
+      setCameraCoords({ lat, lng, alt: c.height });
+      // Cheap frame-time estimate: time between sampling intervals
+      const now = performance.now();
+      setFrameMs(Math.max(0, (now - lastFrameStart) / 100));
+      lastFrameStart = now;
     }, 500);
     return () => clearInterval(interval);
   }, [viewerReady]);
@@ -1101,8 +1160,12 @@ export default function CesiumGlobe() {
   return (
     <div className="h-full w-full bg-zinc-950 text-white flex relative">
 
-      {/* ── Top-left badge + toggle ── */}
-      <div className="absolute top-2 left-2 z-20 flex items-center gap-2 pointer-events-auto">
+      {/* ── Top-left badge + toggle (lowered when tactical chrome owns the header) ── */}
+      <div
+        className={`absolute left-2 z-40 flex items-center gap-2 pointer-events-auto transition-all ${
+          stylePreset !== "off" ? "top-24" : "top-2"
+        }`}
+      >
         <button
           onClick={() => setSidebarCollapsed(p => !p)}
           className="w-8 h-8 rounded-lg bg-zinc-900/90 border border-zinc-700/50 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800 transition-all text-xs backdrop-blur-sm"
@@ -1110,7 +1173,7 @@ export default function CesiumGlobe() {
         >
           {sidebarCollapsed ? "☰" : "✕"}
         </button>
-        {sidebarCollapsed && (
+        {sidebarCollapsed && stylePreset === "off" && (
           <div className="flex items-center gap-2 bg-zinc-900/80 backdrop-blur-sm rounded-lg border border-zinc-700/30 px-2.5 py-1.5 text-[10px] text-zinc-400">
             {loading && <span className="text-cyan-400 animate-pulse">Loading…</span>}
             <span className="text-red-400">{events.length} events</span>
@@ -1139,7 +1202,7 @@ export default function CesiumGlobe() {
       )}
 
       {/* ── Layer Sidebar (slides over globe, doesn't push it) ── */}
-      <aside className={`absolute top-12 left-2 z-20 transition-all duration-300 rounded-xl overflow-hidden ${sidebarCollapsed ? "w-0 opacity-0 pointer-events-none" : "w-60 opacity-100"}`}>
+      <aside className={`absolute left-2 z-30 transition-all duration-300 rounded-xl overflow-hidden ${sidebarCollapsed ? "w-0 opacity-0 pointer-events-none" : "w-60 opacity-100"} ${stylePreset !== "off" ? "top-36" : "top-12"}`}>
         <div className="bg-zinc-900/90 backdrop-blur-md border border-zinc-700/50 rounded-xl max-h-[calc(100vh-6rem)] overflow-y-auto p-3 space-y-3 text-xs">
 
           {/* Data Layers */}
@@ -1246,7 +1309,25 @@ export default function CesiumGlobe() {
 
       {/* ── Cesium Container ── */}
       <div className="flex-1 relative h-full">
-        <div ref={containerRef} className="w-full h-full" />
+        <div
+          ref={containerRef}
+          className="w-full h-full"
+          style={{ filter: presetFilter(stylePreset), transition: "filter 0.3s ease-out" }}
+        />
+
+        {/* ── Tactical HUD overlay (classifications, MGRS, REC timestamp, style switcher) ── */}
+        <TacticalChrome
+          preset={stylePreset}
+          onPresetChange={setStylePreset}
+          stats={{
+            entities: events.length + vessels.length + flights.length + fires.length,
+            sources: 18,
+            density: (events.length + vessels.length + flights.length) / Math.max(1, cameraAlt / 100_000),
+            frameMs,
+          }}
+          coords={cameraCoords}
+          pinLabel={selectedEntity ? `${selectedEntity.type.toUpperCase()} · ${selectedEntity.title}` : null}
+        />
 
         {/* ── Geofence drawing toolbar (top-center, only while drawing) ── */}
         {drawMode && (
