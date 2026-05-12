@@ -54,6 +54,32 @@ def list_geofences(active: bool = True, limit: int = Query(default=50, ge=1, le=
     return {"geofences": [dict(r) for r in rows]}
 
 
+@router.get("/geofences/geojson")
+def geofences_geojson(active: bool = True):
+    """Return all geofences as a GeoJSON FeatureCollection (for map rendering)."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT id, name, description, category, active, event_count,
+                  alert_on_entry, alert_severity_min, polygon_json, created_at
+           FROM geofences WHERE active = ?""",
+        (1 if active else 0,),
+    ).fetchall()
+
+    features = []
+    for r in rows:
+        d = dict(r)
+        try:
+            geometry = json.loads(d.pop("polygon_json"))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": geometry,
+            "properties": d,
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
 @router.get("/geofences/{geofence_id}")
 def get_geofence(geofence_id: str):
     """Get geofence detail with polygon and events."""

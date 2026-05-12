@@ -43,6 +43,15 @@ interface WebcamFeature {
     thumbnail_url: string | null; category: string; country_code: string;
   };
 }
+interface GeofenceFeature {
+  type: string;
+  geometry: { type: string; coordinates: number[][][] }; // Polygon
+  properties: {
+    id: string; name: string; description: string; category: string;
+    event_count: number; alert_on_entry: number; alert_severity_min: number;
+    created_at: string;
+  };
+}
 
 // ─── Helpers ───
 
@@ -101,6 +110,8 @@ export default function CesiumGlobe() {
   const [showFires, setShowFires] = useState(true);
   const [showSatellites, setShowSatellites] = useState(true);
   const [showWebcams, setShowWebcams] = useState(true);
+  const [showGeofences, setShowGeofences] = useState(true);
+  const [showLiveImagery, setShowLiveImagery] = useState(false);
   const [showBuildings, setShowBuildings] = useState(true);
   const [showAtmosphere, setShowAtmosphere] = useState(true);
   const [showLighting, setShowLighting] = useState(true);
@@ -116,6 +127,19 @@ export default function CesiumGlobe() {
     type: string; title: string; details: Record<string, string | number>;
     lat: number; lng: number; alt?: number;
   } | null>(null);
+
+  // Geofences
+  const [geofences, setGeofences] = useState<GeofenceFeature[]>([]);
+  const [drawMode, setDrawMode] = useState(false);
+  // Refs so the click handler effect doesn't have to re-register on every state change
+  const drawModeRef = useRef(false);
+  useEffect(() => { drawModeRef.current = drawMode; }, [drawMode]);
+  // Points held in a ref to avoid re-renders during point capture; mirrored to state for UI
+  const drawPointsRef = useRef<Array<[number, number]>>([]);
+  const [drawPointCount, setDrawPointCount] = useState(0);
+  const [saveFenceOpen, setSaveFenceOpen] = useState(false);
+  const [fenceForm, setFenceForm] = useState({ name: "", category: "custom", description: "" });
+  const [selectedFence, setSelectedFence] = useState<GeofenceFeature | null>(null);
 
   // ─── Data Fetching ───
 
@@ -169,11 +193,70 @@ export default function CesiumGlobe() {
     } catch { /* silent */ }
   }, []);
 
+  const fetchGeofences = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/geofences/geojson`);
+      if (res.ok) {
+        const d = await res.json();
+        setGeofences(d.features || []);
+      }
+    } catch { /* silent */ }
+  }, []);
+
   useEffect(() => {
     setLoading(true);
-    Promise.all([fetchEvents(), fetchVesselsAndFlights(), fetchFires(), fetchSatellites(), fetchWebcams()])
-      .finally(() => setLoading(false));
-  }, [fetchEvents, fetchVesselsAndFlights, fetchFires, fetchSatellites, fetchWebcams]);
+    Promise.all([
+      fetchEvents(), fetchVesselsAndFlights(), fetchFires(),
+      fetchSatellites(), fetchWebcams(), fetchGeofences(),
+    ]).finally(() => setLoading(false));
+  }, [fetchEvents, fetchVesselsAndFlights, fetchFires, fetchSatellites, fetchWebcams, fetchGeofences]);
+
+  // ─── Live polling — refresh vessels/flights every 20s ───
+  useEffect(() => {
+    const interval = setInterval(() => { fetchVesselsAndFlights(); }, 20_000);
+    return () => clearInterval(interval);
+  }, [fetchVesselsAndFlights]);
+
+  // ─── NASA GIBS live satellite imagery overlay (MODIS Terra, daily) ───
+  // GIBS is free, no auth required: https://nasa-gibs.github.io/gibs-api-docs/
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    let added: unknown = null;
+    let cancelled = false;
+
+    import("cesium").then((Cesium) => {
+      if (cancelled || !showLiveImagery) return;
+      // GIBS imagery is delayed ~1 day. Use yesterday's date.
+      const d = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const dateStr = d.toISOString().slice(0, 10);
+      const provider = new Cesium.WebMapTileServiceImageryProvider({
+        url: `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/MODIS_Terra_CorrectedReflectance_TrueColor/default/${dateStr}/250m/{TileMatrix}/{TileRow}/{TileCol}.jpg`,
+        layer: "MODIS_Terra_CorrectedReflectance_TrueColor",
+        style: "default",
+        format: "image/jpeg",
+        tileMatrixSetID: "250m",
+        maximumLevel: 8,
+        tileWidth: 512,
+        tileHeight: 512,
+        tilingScheme: new Cesium.GeographicTilingScheme(),
+        credit: new Cesium.Credit("NASA EOSDIS GIBS"),
+      });
+      const layer = viewer.imageryLayers.addImageryProvider(provider);
+      layer.alpha = 0.85;
+      added = layer;
+      viewer.scene.requestRender();
+    });
+
+    return () => {
+      cancelled = true;
+      if (added && viewer && !viewer.isDestroyed()) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        viewer.imageryLayers.remove(added as any);
+        viewer.scene.requestRender();
+      }
+    };
+  }, [showLiveImagery, viewerReady]);
 
   // ─── Camera altitude monitor ───
 
@@ -606,6 +689,133 @@ export default function CesiumGlobe() {
     });
   }, [webcams, showWebcams, viewerReady]);
 
+  // ─── Render geofences as semi-transparent polygons ───
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    import("cesium").then((Cesium) => {
+      const existing = viewer.dataSources.getByName("geofences")[0];
+      if (existing) viewer.dataSources.remove(existing);
+      if (!showGeofences || geofences.length === 0) { viewer.scene.requestRender(); return; }
+
+      const ds = new Cesium.CustomDataSource("geofences");
+      const categoryColors: Record<string, string> = {
+        military: "#ef4444", economic: "#eab308", environmental: "#10b981",
+        political: "#3b82f6", custom: "#a855f7",
+      };
+
+      for (const gf of geofences) {
+        // GeoJSON Polygon: coordinates is [ring][point][lng/lat] — use the outer ring
+        const ring = gf.geometry?.coordinates?.[0];
+        if (!Array.isArray(ring) || ring.length < 3) continue;
+
+        // Flatten to Cesium degrees array: [lng, lat, lng, lat, ...]
+        const flat: number[] = [];
+        for (const [lng, lat] of ring) flat.push(lng, lat);
+
+        const color = categoryColors[gf.properties.category] || "#a855f7";
+        const cesiumColor = Cesium.Color.fromCssColorString(color);
+
+        // Compute centroid for label placement
+        let cLng = 0, cLat = 0;
+        for (const [lng, lat] of ring) { cLng += lng; cLat += lat; }
+        cLng /= ring.length; cLat /= ring.length;
+
+        ds.entities.add({
+          polygon: {
+            hierarchy: Cesium.Cartesian3.fromDegreesArray(flat),
+            material: cesiumColor.withAlpha(0.18),
+            outline: true,
+            outlineColor: cesiumColor.withAlpha(0.95),
+            outlineWidth: 2,
+            height: 0,
+          },
+          // Outline polyline (polygon outlineWidth is ignored on most GPUs)
+          polyline: {
+            positions: Cesium.Cartesian3.fromDegreesArray([...flat, ring[0][0], ring[0][1]]),
+            width: 2.5,
+            material: cesiumColor.withAlpha(0.9),
+            clampToGround: true,
+          },
+          position: Cesium.Cartesian3.fromDegrees(cLng, cLat),
+          label: {
+            text: `${gf.properties.name} · ${gf.properties.event_count} events`,
+            font: "bold 11px sans-serif",
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: cesiumColor,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            showBackground: true,
+            backgroundColor: cesiumColor.withAlpha(0.85),
+            backgroundPadding: new Cesium.Cartesian2(6, 3),
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 15_000_000),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          properties: { type: "geofence", ...gf.properties },
+        });
+      }
+
+      viewer.dataSources.add(ds);
+      viewer.scene.requestRender();
+    });
+  }, [geofences, showGeofences, viewerReady]);
+
+  // ─── Render in-progress drawing polyline ───
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    import("cesium").then((Cesium) => {
+      const existing = viewer.dataSources.getByName("draw-preview")[0];
+      if (existing) viewer.dataSources.remove(existing);
+      if (!drawMode || drawPointCount === 0) { viewer.scene.requestRender(); return; }
+
+      const ds = new Cesium.CustomDataSource("draw-preview");
+      const flat: number[] = [];
+      for (const [lng, lat] of drawPointsRef.current) flat.push(lng, lat);
+
+      // Render the current ring as a closed-ish polyline + vertices
+      if (drawPointCount >= 1) {
+        const closed = drawPointCount >= 3
+          ? [...flat, drawPointsRef.current[0][0], drawPointsRef.current[0][1]]
+          : flat;
+        ds.entities.add({
+          polyline: {
+            positions: Cesium.Cartesian3.fromDegreesArray(closed),
+            width: 3,
+            material: Cesium.Color.fromCssColorString("#22d3ee").withAlpha(0.9),
+            clampToGround: true,
+          },
+        });
+        if (drawPointCount >= 3) {
+          ds.entities.add({
+            polygon: {
+              hierarchy: Cesium.Cartesian3.fromDegreesArray(flat),
+              material: Cesium.Color.fromCssColorString("#22d3ee").withAlpha(0.18),
+              height: 0,
+            },
+          });
+        }
+      }
+      for (const [lng, lat] of drawPointsRef.current) {
+        ds.entities.add({
+          position: Cesium.Cartesian3.fromDegrees(lng, lat),
+          point: {
+            pixelSize: 8,
+            color: Cesium.Color.fromCssColorString("#22d3ee"),
+            outlineColor: Cesium.Color.WHITE,
+            outlineWidth: 1.5,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+      }
+      viewer.dataSources.add(ds);
+      viewer.scene.requestRender();
+    });
+  }, [drawMode, drawPointCount, viewerReady]);
+
   // ─── Click handlers — zoom to entity + show 3D model + detail panel ───
 
   useEffect(() => {
@@ -618,9 +828,10 @@ export default function CesiumGlobe() {
       // Track the 3D model entity shown on click so we can remove it later
       let activeModel: InstanceType<typeof Cesium.Entity> | null = null;
 
-      // Double-click → zoom in toward globe position
+      // Double-click → zoom in toward globe position (skipped while drawing)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       handler.setInputAction((movement: any) => {
+        if (drawModeRef.current) return;
         const cartesian = viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
         if (Cesium.defined(cartesian)) {
           const carto = Cesium.Cartographic.fromCartesian(cartesian);
@@ -632,9 +843,22 @@ export default function CesiumGlobe() {
         }
       }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
-      // Single click → select entity, show 3D model + detail panel
+      // Single click → either capture a draw point OR select entity + show 3D model
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       handler.setInputAction((movement: any) => {
+        // ── Draw mode: capture a polygon vertex and exit ──
+        if (drawModeRef.current) {
+          const cartesian = viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
+          if (Cesium.defined(cartesian)) {
+            const carto = Cesium.Cartographic.fromCartesian(cartesian);
+            const lng = Cesium.Math.toDegrees(carto.longitude);
+            const lat = Cesium.Math.toDegrees(carto.latitude);
+            drawPointsRef.current = [...drawPointsRef.current, [lng, lat]];
+            setDrawPointCount(drawPointsRef.current.length);
+          }
+          return;
+        }
+
         // Remove previous 3D model preview
         if (activeModel) {
           viewer.entities.remove(activeModel);
@@ -805,6 +1029,73 @@ export default function CesiumGlobe() {
     });
   }, [viewerReady]);
 
+  // ─── Geofence drawing controls ───
+
+  const startDrawing = useCallback(() => {
+    drawPointsRef.current = [];
+    setDrawPointCount(0);
+    setSelectedEntity(null);
+    setDrawMode(true);
+  }, []);
+
+  const cancelDrawing = useCallback(() => {
+    drawPointsRef.current = [];
+    setDrawPointCount(0);
+    setDrawMode(false);
+    setSaveFenceOpen(false);
+  }, []);
+
+  const undoLastPoint = useCallback(() => {
+    drawPointsRef.current = drawPointsRef.current.slice(0, -1);
+    setDrawPointCount(drawPointsRef.current.length);
+  }, []);
+
+  const finishDrawing = useCallback(() => {
+    if (drawPointsRef.current.length < 3) return;
+    setDrawMode(false);
+    setSaveFenceOpen(true);
+  }, []);
+
+  const saveGeofence = useCallback(async () => {
+    if (!fenceForm.name.trim() || drawPointsRef.current.length < 3) return;
+    // Polygon must be closed (first == last)
+    const ring = [...drawPointsRef.current];
+    if (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1]) {
+      ring.push(ring[0]);
+    }
+    try {
+      const res = await fetch(`${API_URL}/api/geofences`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: fenceForm.name.trim(),
+          polygon: ring,
+          description: fenceForm.description,
+          category: fenceForm.category,
+          alert_on_entry: true,
+          alert_severity_min: 0,
+        }),
+      });
+      if (res.ok) {
+        await fetchGeofences();
+        setFenceForm({ name: "", category: "custom", description: "" });
+        drawPointsRef.current = [];
+        setDrawPointCount(0);
+        setSaveFenceOpen(false);
+      }
+    } catch { /* silent */ }
+  }, [fenceForm, fetchGeofences]);
+
+  const deleteGeofence = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/geofences/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setSelectedFence(null);
+        await fetchGeofences();
+      }
+    } catch { /* silent */ }
+  }, [fetchGeofences]);
+
   // ─── Render ───
 
   return (
@@ -828,7 +1119,11 @@ export default function CesiumGlobe() {
             {satelliteOrbits?.features?.length ? <span className="text-cyan-400">🛰{satelliteOrbits.features.length}</span> : null}
             {vessels.length > 0 && <span className="text-blue-400">{vessels.length} vessels</span>}
             {flights.length > 0 && <span className="text-zinc-300">{flights.length} flights</span>}
-            <span className="text-emerald-400 font-medium">3D</span>
+            {geofences.length > 0 && <span className="text-fuchsia-400">⛶{geofences.length}</span>}
+            <span className="flex items-center gap-1 text-emerald-400 font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              LIVE
+            </span>
           </div>
         )}
       </div>
@@ -857,6 +1152,7 @@ export default function CesiumGlobe() {
               { label: `Fires (${fires.length})`, checked: showFires, onChange: () => setShowFires(p => !p), color: "bg-orange-400" },
               { label: `Satellites (${satelliteOrbits?.features?.length ?? 0})`, checked: showSatellites, onChange: () => setShowSatellites(p => !p), color: "bg-cyan-400" },
               { label: `Webcams (${webcams.length})`, checked: showWebcams, onChange: () => setShowWebcams(p => !p), color: "bg-purple-400" },
+              { label: `Geofences (${geofences.length})`, checked: showGeofences, onChange: () => setShowGeofences(p => !p), color: "bg-fuchsia-400" },
             ].map(({ label, checked, onChange, color }) => (
               <label key={label} className="flex items-center gap-2 py-0.5 cursor-pointer">
                 <input type="checkbox" checked={checked} onChange={onChange}
@@ -871,6 +1167,7 @@ export default function CesiumGlobe() {
           <section>
             <h3 className="text-[10px] uppercase text-zinc-500 font-semibold mb-1.5 tracking-wider">3D Features</h3>
             {[
+              { label: "Live Sat Imagery (MODIS)", checked: showLiveImagery, onChange: () => setShowLiveImagery(p => !p) },
               { label: "3D Buildings", checked: showBuildings, onChange: toggleBuildings },
               { label: "Atmosphere", checked: showAtmosphere, onChange: toggleAtmosphere },
               { label: "Day/Night Lighting", checked: showLighting, onChange: toggleLighting },
@@ -881,6 +1178,46 @@ export default function CesiumGlobe() {
                 <span className={checked ? "text-zinc-200" : "text-zinc-600"}>{label}</span>
               </label>
             ))}
+          </section>
+
+          {/* Geofences */}
+          <section>
+            <div className="flex items-center justify-between mb-1.5">
+              <h3 className="text-[10px] uppercase text-zinc-500 font-semibold tracking-wider">Geofences</h3>
+              {!drawMode && (
+                <button
+                  onClick={startDrawing}
+                  className="text-[10px] px-2 py-0.5 rounded bg-fuchsia-600/80 hover:bg-fuchsia-500 text-white font-medium transition-colors"
+                  title="Click points on the globe to draw a monitoring polygon"
+                >
+                  ＋ Draw
+                </button>
+              )}
+            </div>
+            {geofences.length === 0 ? (
+              <div className="text-[10px] text-zinc-600 italic py-1">No geofences yet</div>
+            ) : (
+              <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                {geofences.map((g) => (
+                  <button
+                    key={g.properties.id}
+                    onClick={() => {
+                      setSelectedFence(g);
+                      const ring = g.geometry?.coordinates?.[0];
+                      if (ring && ring.length) {
+                        let cLng = 0, cLat = 0;
+                        for (const [lng, lat] of ring) { cLng += lng; cLat += lat; }
+                        flyTo(cLng / ring.length, cLat / ring.length, 2_000_000);
+                      }
+                    }}
+                    className="w-full text-left px-2 py-1 rounded hover:bg-zinc-800 text-[10px] text-zinc-300 truncate flex items-center justify-between gap-2"
+                  >
+                    <span className="truncate">{g.properties.name}</span>
+                    <span className="text-fuchsia-400">{g.properties.event_count}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </section>
 
           {/* Quick Navigation */}
@@ -910,6 +1247,128 @@ export default function CesiumGlobe() {
       {/* ── Cesium Container ── */}
       <div className="flex-1 relative h-full">
         <div ref={containerRef} className="w-full h-full" />
+
+        {/* ── Geofence drawing toolbar (top-center, only while drawing) ── */}
+        {drawMode && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-zinc-900/95 backdrop-blur-md border border-fuchsia-500/40 rounded-xl shadow-2xl px-4 py-2.5 flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-fuchsia-400 animate-pulse" />
+              <span className="text-xs font-medium text-white">
+                Click globe to add vertices · {drawPointCount} point{drawPointCount === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="h-4 w-px bg-zinc-700" />
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={undoLastPoint}
+                disabled={drawPointCount === 0}
+                className="text-[11px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                Undo
+              </button>
+              <button
+                onClick={finishDrawing}
+                disabled={drawPointCount < 3}
+                className="text-[11px] px-2.5 py-1 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-medium disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed"
+              >
+                ✓ Finish ({drawPointCount}/3+)
+              </button>
+              <button
+                onClick={cancelDrawing}
+                className="text-[11px] px-2 py-1 rounded bg-zinc-800 hover:bg-red-900/60 hover:text-red-300 text-zinc-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Save geofence dialog ── */}
+        {saveFenceOpen && (
+          <div className="absolute inset-0 z-40 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+            <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-96 overflow-hidden">
+              <div className="px-4 py-3 border-b border-zinc-700 flex items-center justify-between">
+                <span className="text-sm font-semibold text-white">Save Geofence</span>
+                <button onClick={cancelDrawing} className="text-zinc-500 hover:text-white">✕</button>
+              </div>
+              <div className="p-4 space-y-3">
+                <div>
+                  <label className="text-[10px] uppercase text-zinc-500 font-semibold">Name</label>
+                  <input
+                    type="text"
+                    autoFocus
+                    value={fenceForm.name}
+                    onChange={(e) => setFenceForm({ ...fenceForm, name: e.target.value })}
+                    placeholder="e.g. Strait of Hormuz"
+                    className="w-full mt-1 bg-zinc-950 border border-zinc-700 rounded-md px-2.5 py-1.5 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-fuchsia-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase text-zinc-500 font-semibold">Category</label>
+                  <select
+                    value={fenceForm.category}
+                    onChange={(e) => setFenceForm({ ...fenceForm, category: e.target.value })}
+                    className="w-full mt-1 bg-zinc-950 border border-zinc-700 rounded-md px-2.5 py-1.5 text-sm text-white"
+                  >
+                    <option value="custom">Custom</option>
+                    <option value="military">Military</option>
+                    <option value="economic">Economic</option>
+                    <option value="environmental">Environmental</option>
+                    <option value="political">Political</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase text-zinc-500 font-semibold">Description (optional)</label>
+                  <textarea
+                    value={fenceForm.description}
+                    onChange={(e) => setFenceForm({ ...fenceForm, description: e.target.value })}
+                    rows={2}
+                    className="w-full mt-1 bg-zinc-950 border border-zinc-700 rounded-md px-2.5 py-1.5 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-fuchsia-500 resize-none"
+                  />
+                </div>
+                <div className="text-[10px] text-zinc-500">
+                  {drawPointCount} vertices · alerts will fire when new events enter this area
+                </div>
+              </div>
+              <div className="px-4 py-3 border-t border-zinc-700 flex gap-2 justify-end">
+                <button onClick={cancelDrawing} className="text-xs px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300">Cancel</button>
+                <button
+                  onClick={saveGeofence}
+                  disabled={!fenceForm.name.trim()}
+                  className="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-medium disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  Save Geofence
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Selected geofence panel (left side) ── */}
+        {selectedFence && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-72 bg-zinc-900/95 border border-fuchsia-700/40 rounded-xl shadow-2xl backdrop-blur-md overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2 bg-zinc-800/80 border-b border-zinc-700/50">
+              <span className="text-xs font-semibold text-fuchsia-300 truncate">⛶ {selectedFence.properties.name}</span>
+              <button onClick={() => setSelectedFence(null)} className="text-zinc-500 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="px-4 py-3 space-y-1.5 text-[11px]">
+              <div className="flex justify-between"><span className="text-zinc-500">Category</span><span className="text-zinc-200">{selectedFence.properties.category}</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">Events inside</span><span className="text-fuchsia-300 font-medium">{selectedFence.properties.event_count}</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">Alerts on entry</span><span className="text-zinc-200">{selectedFence.properties.alert_on_entry ? "Yes" : "No"}</span></div>
+              {selectedFence.properties.description && (
+                <div className="pt-1 text-zinc-400 italic">{selectedFence.properties.description}</div>
+              )}
+            </div>
+            <div className="px-4 pb-3 flex gap-2">
+              <button
+                onClick={() => deleteGeofence(selectedFence.properties.id)}
+                className="flex-1 text-[10px] py-1.5 rounded bg-red-900/40 hover:bg-red-800 text-red-300 hover:text-white transition-colors"
+              >
+                Delete Geofence
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ── Selected Entity Detail Panel (right side) ── */}
         {selectedEntity && (
