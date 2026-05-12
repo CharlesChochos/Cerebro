@@ -155,7 +155,8 @@ export default function CesiumGlobe() {
   const [showWebcams, setShowWebcams] = useState(true);
   const [showGeofences, setShowGeofences] = useState(true);
   const [showLiveImagery, setShowLiveImagery] = useState(false);
-  const [showBuildings, setShowBuildings] = useState(true);
+  // Default off so we don't attempt a load with no key; user opts in.
+  const [showBuildings, setShowBuildings] = useState(false);
   const [showAtmosphere, setShowAtmosphere] = useState(true);
   const [showLighting, setShowLighting] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -1031,17 +1032,56 @@ export default function CesiumGlobe() {
 
   // ─── Toggle helpers ───
 
-  const toggleBuildings = useCallback(() => {
+  // Load Google Photorealistic 3D Tiles (same data as Google Earth's 3D cities)
+  // when the user enables "3D Buildings". Needs NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+  // (Maps Tile API enabled) or NEXT_PUBLIC_CESIUM_ION_TOKEN as a fallback.
+  useEffect(() => {
     const viewer = viewerRef.current;
-    if (!viewer || viewer.isDestroyed()) return;
-    const prims = viewer.scene.primitives;
-    for (let i = 0; i < prims.length; i++) {
-      const p = prims.get(i);
-      if (p.constructor?.name === "Cesium3DTileset") p.show = !showBuildings;
-    }
-    setShowBuildings(p => !p);
-    viewer.scene.requestRender();
+    if (!viewer || viewer.isDestroyed() || !showBuildings) return;
+
+    const googleKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+    const ionToken = process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN;
+    if (!googleKey && !ionToken) return; // nothing to load — user must provide a key
+
+    let tileset: unknown = null;
+    let cancelled = false;
+
+    (async () => {
+      const Cesium = await import("cesium");
+      try {
+        if (googleKey) {
+          tileset = await Cesium.createGooglePhotorealistic3DTileset({ key: googleKey });
+        } else if (ionToken) {
+          Cesium.Ion.defaultAccessToken = ionToken;
+          tileset = await Cesium.Cesium3DTileset.fromIonAssetId(2275207); // Google Photorealistic via Ion
+        }
+        if (cancelled || !tileset || viewer.isDestroyed()) return;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        viewer.scene.primitives.add(tileset as any);
+        // Sharper detail when zoomed in — lower SSE renders more triangles
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (tileset as any).maximumScreenSpaceError = 8;
+        viewer.scene.globe.depthTestAgainstTerrain = true;
+        viewer.scene.requestRender();
+      } catch (err) {
+        console.warn("[CesiumGlobe] Failed to load 3D Tiles:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (tileset && viewer && !viewer.isDestroyed()) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        viewer.scene.primitives.remove(tileset as any);
+        viewer.scene.globe.depthTestAgainstTerrain = false;
+        viewer.scene.requestRender();
+      }
+    };
   }, [showBuildings, viewerReady]);
+
+  const toggleBuildings = useCallback(() => {
+    setShowBuildings(p => !p);
+  }, []);
 
   const toggleAtmosphere = useCallback(() => {
     const viewer = viewerRef.current;
@@ -1214,7 +1254,7 @@ export default function CesiumGlobe() {
             <h3 className="text-[10px] uppercase text-zinc-500 font-semibold mb-1.5 tracking-wider">3D Features</h3>
             {[
               { label: "Live Sat Imagery (MODIS)", checked: showLiveImagery, onChange: () => setShowLiveImagery(p => !p) },
-              { label: "3D Buildings", checked: showBuildings, onChange: toggleBuildings },
+              { label: "Photorealistic 3D (Google)", checked: showBuildings, onChange: toggleBuildings },
               { label: "Atmosphere", checked: showAtmosphere, onChange: toggleAtmosphere },
               { label: "Day/Night Lighting", checked: showLighting, onChange: toggleLighting },
             ].map(({ label, checked, onChange }) => (
@@ -1224,6 +1264,15 @@ export default function CesiumGlobe() {
                 <span className={checked ? "text-zinc-200" : "text-zinc-600"}>{label}</span>
               </label>
             ))}
+            {/* Helper note when no key is set */}
+            {showBuildings && !process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY && !process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN && (
+              <div className="mt-2 text-[9px] leading-snug text-amber-400/80 bg-amber-950/30 border border-amber-800/50 rounded px-2 py-1.5">
+                Photorealistic 3D needs a key. Set{" "}
+                <span className="font-mono">NEXT_PUBLIC_GOOGLE_MAPS_API_KEY</span> (Maps Tile API) or{" "}
+                <span className="font-mono">NEXT_PUBLIC_CESIUM_ION_TOKEN</span> in{" "}
+                <span className="font-mono">frontend/.env.local</span> and restart.
+              </div>
+            )}
           </section>
 
           {/* Geofences */}
