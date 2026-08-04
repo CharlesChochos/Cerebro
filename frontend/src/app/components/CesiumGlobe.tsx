@@ -87,6 +87,22 @@ function bracketReticle(color: string, glyph = ""): string {
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
+// Post-process helper: does the collection already have a stage with this name?
+// Guards against React strict-mode double-invocation adding the same stage twice
+// (Cesium throws "already added or does not have a unique name" on collision).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasStageNamed(collection: any, name: string): boolean {
+  if (!collection || !name) return false;
+  try {
+    const len = collection.length ?? 0;
+    for (let i = 0; i < len; i++) {
+      const s = collection.get(i);
+      if (s?.name === name) return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
 // Airplane: bracket reticle + ▲ glyph inside
 function createAirplaneSVG(color: string): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
@@ -318,42 +334,50 @@ export default function CesiumGlobe() {
     import("cesium").then((Cesium) => {
       if (cancelled || viewer.isDestroyed()) return;
       const scene = viewer.scene;
-      // Cesium's shipped .d.ts only declares nightVision/edgeDetection/silhouette,
-      // but bloom + blackAndWhite exist at runtime. Cast around the gap.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const psStages = scene.postProcessStages as any;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const lib = Cesium.PostProcessStageLibrary as any;
 
-      // Bloom = soft phosphor glow. Good for CRT and NV; skip for FLIR/off.
-      if (stylePreset === "crt" || stylePreset === "nightvision") {
-        const bloom = lib.createBloomStage();
-        bloom.enabled = true;
-        bloom.uniforms.glowOnly = false;
-        bloom.uniforms.contrast = stylePreset === "crt" ? 128 : 100;
-        bloom.uniforms.brightness = stylePreset === "crt" ? -0.25 : -0.15;
-        bloom.uniforms.delta = 1.2;
-        bloom.uniforms.sigma = 3.0;
-        bloom.uniforms.stepSize = 1.5;
-        scene.postProcessStages.add(bloom);
-        stages.push(bloom);
+      // Bloom is BUILT IN on the collection at scene.postProcessStages.bloom.
+      // Creating a new one via createBloomStage() collides with czm_bloom and
+      // throws "already added or does not have a unique name". Toggle the
+      // built-in instead. Skipped for FLIR/off.
+      if (psStages.bloom) {
+        const bloom = psStages.bloom;
+        bloom.enabled = stylePreset === "crt" || stylePreset === "nightvision";
+        if (bloom.enabled) {
+          bloom.uniforms.glowOnly = false;
+          bloom.uniforms.contrast = stylePreset === "crt" ? 128 : 100;
+          bloom.uniforms.brightness = stylePreset === "crt" ? -0.25 : -0.15;
+          bloom.uniforms.delta = 1.2;
+          bloom.uniforms.sigma = 3.0;
+          bloom.uniforms.stepSize = 1.5;
+        }
       }
 
-      // Cesium's real shader-based night-vision — cheaper and truer than a CSS hue-rotate.
+      // Non-built-in stages: created + added, must be removed on cleanup.
       if (stylePreset === "nightvision") {
         const nv = Cesium.PostProcessStageLibrary.createNightVisionStage();
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (nv as any).enabled = true;
-        scene.postProcessStages.add(nv);
-        stages.push(nv);
+        // Only add if a stage with this name isn't already present (guards
+        // against strict-mode double-invoke).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (!psStages.contains?.(nv) && !hasStageNamed(psStages, (nv as any).name)) {
+          scene.postProcessStages.add(nv);
+          stages.push(nv);
+        }
       }
 
-      // FLIR: black-and-white gives the luminance signal; the CSS invert+hue-rotate
-      // then colors it as false thermal.
       if (stylePreset === "flir") {
         const bw = lib.createBlackAndWhiteStage();
         bw.enabled = true;
-        bw.uniforms.gradations = 6; // posterize slightly like a thermal LUT
-        scene.postProcessStages.add(bw);
-        stages.push(bw);
+        bw.uniforms.gradations = 6;
+        if (!hasStageNamed(psStages, bw.name)) {
+          scene.postProcessStages.add(bw);
+          stages.push(bw);
+        }
       }
 
       scene.requestRender();
@@ -362,9 +386,12 @@ export default function CesiumGlobe() {
     return () => {
       cancelled = true;
       if (viewer && !viewer.isDestroyed()) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const psStages = viewer.scene.postProcessStages as any;
+        if (psStages.bloom) psStages.bloom.enabled = false;
         for (const s of stages) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          try { viewer.scene.postProcessStages.remove(s as any); } catch { /* ignore */ }
+          try { psStages.remove(s as any); } catch { /* ignore */ }
         }
         viewer.scene.requestRender();
       }
