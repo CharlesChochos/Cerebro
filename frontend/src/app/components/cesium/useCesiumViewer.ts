@@ -88,8 +88,18 @@ export function useCesiumViewer(
       }
 
       // ─── Create viewer ───
-      // Without Ion token, Bing Maps tiles will 401 silently.
-      // The render loop still runs fine — we replace imagery below.
+      // If we don't set baseLayer, Cesium tries Bing Maps by default and 401s
+      // without an Ion token. We provide our own base layer via
+      // ImageryLayer.fromProviderAsync so Cesium never attempts Bing.
+      const initialBaseLayer = hasIonToken
+        ? undefined // let Cesium use its default (Bing via Ion) when the token is present
+        : Cesium.ImageryLayer.fromProviderAsync(
+            Cesium.TileMapServiceImageryProvider.fromUrl(
+              "/cesium/Assets/Textures/NaturalEarthII"
+            ),
+            {}
+          );
+
       const viewer = new Cesium.Viewer(containerRef.current!, {
         animation: false,
         timeline: false,
@@ -103,6 +113,7 @@ export function useCesiumViewer(
         selectionIndicator: false,
         creditContainer: document.createElement("div"),
         msaaSamples: 2,
+        ...(initialBaseLayer ? { baseLayer: initialBaseLayer } : {}),
       });
 
       if (destroyed) {
@@ -130,26 +141,10 @@ export function useCesiumViewer(
       if (scene.skyBox) (scene.skyBox as unknown as { show: boolean }).show = true;
       scene.backgroundColor = Cesium.Color.fromCssColorString("#0a0a0a");
 
-      // ─── Replace default imagery when no Ion token ───
+      // ─── Add ESRI World Imagery overlay when no Ion token ───
+      // NaturalEarthII is already the base layer via the constructor above; we
+      // just layer ESRI's high-res satellite on top for city-level detail.
       if (!hasIonToken) {
-        // Remove the default Bing Maps layer (which 401s without Ion token)
-        if (viewer.imageryLayers.length > 0) {
-          viewer.imageryLayers.removeAll();
-        }
-
-        // Add NaturalEarthII (bundled local tiles — instant, guaranteed)
-        try {
-          const tmsProvider = await Cesium.TileMapServiceImageryProvider.fromUrl(
-            "/cesium/Assets/Textures/NaturalEarthII"
-          );
-          if (!viewer.isDestroyed()) {
-            viewer.imageryLayers.addImageryProvider(tmsProvider);
-          }
-        } catch (e) {
-          console.warn("Cesium: NaturalEarthII failed:", e);
-        }
-
-        // Add ESRI World Imagery (high-res satellite, zoom 0-23)
         try {
           const esriProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
             "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer"
