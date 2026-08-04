@@ -305,6 +305,72 @@ export default function CesiumGlobe() {
     };
   }, [showLiveImagery, viewerReady]);
 
+  // ─── Cesium PostProcess stages driven by the style preset ───
+  // Adds GPU shader stages (bloom, native NV, B&W) on top of the CSS filter.
+  // Layering: WebGL shader stages run first, then the CSS filter is applied
+  // to the wrapping <div>. Together they produce the CRT/NV/FLIR look.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) return;
+    let stages: unknown[] = [];
+    let cancelled = false;
+
+    import("cesium").then((Cesium) => {
+      if (cancelled || viewer.isDestroyed()) return;
+      const scene = viewer.scene;
+      // Cesium's shipped .d.ts only declares nightVision/edgeDetection/silhouette,
+      // but bloom + blackAndWhite exist at runtime. Cast around the gap.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const lib = Cesium.PostProcessStageLibrary as any;
+
+      // Bloom = soft phosphor glow. Good for CRT and NV; skip for FLIR/off.
+      if (stylePreset === "crt" || stylePreset === "nightvision") {
+        const bloom = lib.createBloomStage();
+        bloom.enabled = true;
+        bloom.uniforms.glowOnly = false;
+        bloom.uniforms.contrast = stylePreset === "crt" ? 128 : 100;
+        bloom.uniforms.brightness = stylePreset === "crt" ? -0.25 : -0.15;
+        bloom.uniforms.delta = 1.2;
+        bloom.uniforms.sigma = 3.0;
+        bloom.uniforms.stepSize = 1.5;
+        scene.postProcessStages.add(bloom);
+        stages.push(bloom);
+      }
+
+      // Cesium's real shader-based night-vision — cheaper and truer than a CSS hue-rotate.
+      if (stylePreset === "nightvision") {
+        const nv = Cesium.PostProcessStageLibrary.createNightVisionStage();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (nv as any).enabled = true;
+        scene.postProcessStages.add(nv);
+        stages.push(nv);
+      }
+
+      // FLIR: black-and-white gives the luminance signal; the CSS invert+hue-rotate
+      // then colors it as false thermal.
+      if (stylePreset === "flir") {
+        const bw = lib.createBlackAndWhiteStage();
+        bw.enabled = true;
+        bw.uniforms.gradations = 6; // posterize slightly like a thermal LUT
+        scene.postProcessStages.add(bw);
+        stages.push(bw);
+      }
+
+      scene.requestRender();
+    });
+
+    return () => {
+      cancelled = true;
+      if (viewer && !viewer.isDestroyed()) {
+        for (const s of stages) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          try { viewer.scene.postProcessStages.remove(s as any); } catch { /* ignore */ }
+        }
+        viewer.scene.requestRender();
+      }
+    };
+  }, [stylePreset, viewerReady]);
+
   // ─── Camera altitude monitor ───
 
   useEffect(() => {
