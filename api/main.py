@@ -1,6 +1,7 @@
 """
 Cerebro API Server — FastAPI application.
 """
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.settings import FRONTEND_URL
 from db.connection import get_connection
 from db.migrate import run_migrations
+
+# Route module loggers (scheduler, ingestion) surface progress in the terminal.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
 
 # Module-level connection, initialized on startup
 _db_conn = None
@@ -21,7 +28,7 @@ def get_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run migrations on startup, close DB on shutdown."""
+    """Run migrations on startup, start auto-ingest scheduler, close DB on shutdown."""
     global _db_conn
     _db_conn = get_connection()
     applied = run_migrations(_db_conn)
@@ -38,8 +45,15 @@ async def lifespan(app: FastAPI):
     )
     _db_conn.commit()
 
+    # ── Auto-ingest scheduler ──
+    # Fires each source at its natural cadence (opensky 60s, gdelt 15m, etc.)
+    # Disable with CEREBRO_AUTO_INGEST=false.
+    from cron.scheduler import start_scheduler, stop_scheduler
+    scheduler_tasks = start_scheduler()
+
     yield
 
+    await stop_scheduler(scheduler_tasks)
     if _db_conn:
         _db_conn.close()
 

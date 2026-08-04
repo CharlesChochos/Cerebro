@@ -273,14 +273,25 @@ export default function BriefsPanel() {
               {selectedBrief && (
                 <div className="flex-1 border border-zinc-800 rounded-lg bg-zinc-900/30 overflow-y-auto max-h-[calc(100vh-200px)]">
                   <div className="p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <h2 className="text-lg font-bold text-white">{selectedBrief.title}</h2>
-                      <button
-                        onClick={() => setSelectedBrief(null)}
-                        className="text-zinc-500 hover:text-white text-sm"
-                      >
-                        Close
-                      </button>
+                    <div className="flex items-center justify-between mb-4 gap-3">
+                      <h2 className="text-lg font-bold text-white truncate">{selectedBrief.title}</h2>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <a
+                          href={`${API_URL}/api/export/pdf/brief/${selectedBrief.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] px-2 py-1 rounded bg-cyan-900/60 hover:bg-cyan-800/80 text-cyan-200 border border-cyan-800/50 transition-colors"
+                          title="Download this brief as a PDF"
+                        >
+                          ⬇ PDF
+                        </a>
+                        <button
+                          onClick={() => setSelectedBrief(null)}
+                          className="text-zinc-500 hover:text-white text-sm"
+                        >
+                          Close
+                        </button>
+                      </div>
                     </div>
 
                     {/* Metadata bar */}
